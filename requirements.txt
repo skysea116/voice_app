@@ -2,3 +2,4 @@ Flask==2.3.3
 Flask-CORS==4.0.0
 SpeechRecognition==3.10.0
 pydub==0.25.1
+waitress==2.1.2  # ← Вместо gunicorn

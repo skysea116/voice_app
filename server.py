@@ -8,17 +8,19 @@ import io
 from pydub import AudioSegment
 
 app = Flask(__name__)
-CORS(app)  # Разрешаем запросы со всех доменов
-
-print("🚀 Сервер речи запускается...")
-print("✅ Используем Google Speech Recognition API")
+CORS(app)
 
 @app.route('/')
 def home():
     return """
-    <h1>🎤 Голосовой Сервер</h1>
-    <p>Сервер для распознавания речи работает!</p>
-    <p>Используйте endpoint: POST /process</p>
+    <!DOCTYPE html>
+    <html>
+    <head><title>Голосовой Сервер</title></head>
+    <body>
+        <h1>🎤 Голосовой Сервер</h1>
+        <p>Сервер работает! Используйте POST /process</p>
+    </body>
+    </html>
     """
 
 @app.route('/health', methods=['GET'])
@@ -26,15 +28,7 @@ def health():
     return jsonify({
         "status": "ok",
         "service": "speech-recognition",
-        "version": "1.0",
-        "provider": "Google Speech API"
-    })
-
-@app.route('/test', methods=['GET'])
-def test():
-    return jsonify({
-        "message": "Сервер работает!",
-        "instructions": "Отправьте POST запрос на /process с аудио в base64"
+        "endpoints": ["/health", "/process"]
     })
 
 @app.route('/process', methods=['POST'])
@@ -47,95 +41,84 @@ def process():
         
         audio_b64 = data.get('audio')
         if not audio_b64:
-            return jsonify({"error": "Нет аудио данных", "success": False}), 400
-        
-        print("📥 Получено аудио, размер:", len(audio_b64), "символов")
+            return jsonify({"error": "Нет аудио", "success": False}), 400
         
         # Декодируем base64
         audio_bytes = base64.b64decode(audio_b64)
         
-        # Конвертируем WebM в WAV (если нужно)
+        # Сохраняем в временный файл
+        with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as f:
+            f.write(audio_bytes)
+            temp_path = f.name
+        
         try:
-            # Пытаемся открыть как WebM/MP3/OGG
-            audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
-        except:
-            # Если не получается, пробуем как WAV напрямую
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-                f.write(audio_bytes)
-                temp_file = f.name
+            # Конвертируем в WAV
+            audio = AudioSegment.from_file(temp_path)
+            wav_path = temp_path.replace('.webm', '.wav')
+            audio.export(wav_path, format="wav")
             
-            audio = AudioSegment.from_wav(temp_file)
-            os.unlink(temp_file)
-        
-        # Конвертируем в WAV 16kHz mono
-        audio = audio.set_frame_rate(16000).set_channels(1)
-        
-        # Сохраняем во временный файл
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-            audio.export(f.name, format="wav")
-            temp_file = f.name
-        
-        # Распознаем речь через Google Web Speech API
-        recognizer = sr.Recognizer()
-        
-        with sr.AudioFile(temp_file) as source:
-            # Убираем шум
-            recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            audio_data = recognizer.record(source)
+            # Распознаем речь
+            r = sr.Recognizer()
+            with sr.AudioFile(wav_path) as source:
+                audio_data = r.record(source)
+                text = r.recognize_google(audio_data, language='ru-RU')
             
-            try:
-                # Пробуем распознать через Google (бесплатно)
-                text = recognizer.recognize_google(audio_data, language='ru-RU')
-                print("✅ Распознано:", text[:50] + "..." if len(text) > 50 else text)
+            # Коррекция для трахеостомии
+            corrections = {
+                'шш': 'ш', 'сс': 'с', 'хх': 'х',
+                'аа': 'а', 'оо': 'о', 'уу': 'у'
+            }
+            for wrong, correct in corrections.items():
+                text = text.replace(wrong, correct)
+            
+            if text:
+                text = text[0].upper() + text[1:]
+            
+            return jsonify({
+                "success": True,
+                "text": text
+            })
+            
+        except sr.UnknownValueError:
+            return jsonify({
+                "success": False,
+                "error": "Речь не распознана",
+                "text": ""
+            })
+        except Exception as e:
+            return jsonify({
+                "success": False,
+                "error": str(e),
+                "text": ""
+            })
+        finally:
+            # Удаляем временные файлы
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            if os.path.exists(wav_path):
+                os.unlink(wav_path)
                 
-            except sr.UnknownValueError:
-                return jsonify({
-                    "success": False,
-                    "error": "Речь не распознана",
-                    "text": ""
-                })
-            
-            except sr.RequestError as e:
-                return jsonify({
-                    "success": False,
-                    "error": f"Ошибка сервиса Google: {str(e)}",
-                    "text": ""
-                })
-        
-        # Удаляем временный файл
-        os.unlink(temp_file)
-        
-        # Коррекция для трахеостомии
-        corrections = {
-            'шш': 'ш', 'сс': 'с', 'хх': 'х', 'жж': 'ж',
-            'щщ': 'щ', 'чч': 'ч', 'цц': 'ц',
-            'вх': 'в', 'гх': 'г', 'дх': 'д',
-            'пх': 'п', 'тх': 'т', 'кх': 'к'
-        }
-        
-        for wrong, correct in corrections.items():
-            text = text.replace(wrong, correct)
-        
-        # Делаем первую букву заглавной
-        if text:
-            text = text[0].upper() + text[1:]
-        
-        return jsonify({
-            "success": True,
-            "text": text,
-            "confidence": "high",
-            "language": "ru-RU"
-        })
-        
     except Exception as e:
-        print("❌ Ошибка:", str(e))
         return jsonify({
             "success": False,
-            "error": str(e),
+            "error": f"Общая ошибка: {str(e)}",
             "text": ""
         }), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
-    print(f"🌍 Сервер запущен на порту: {port}")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    print(f"🚀 Сервер запускается на порту {port}")
+    
+    # Проверяем, какие WSGI серверы доступны
+    try:
+        from waitress import serve
+        print("✅ Используем Waitress")
+        serve(app, host='0.0.0.0', port=port)
+    except ImportError:
+        try:
+            import gunicorn
+            print("✅ Используем Gunicorn")
+            # Gunicorn запустится через командную строку
+        except ImportError:
+            print("⚠️  Используем встроенный сервер Flask")
+            app.run(host='0.0.0.0', port=port, debug=False)
